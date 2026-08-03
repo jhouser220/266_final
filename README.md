@@ -1,1 +1,1 @@
-# 266_final final paper repository
+# 266 final paper repository
