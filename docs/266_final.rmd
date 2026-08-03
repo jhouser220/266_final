@@ -1,0 +1,505 @@
+---
+title: "Structure as Text: Retrieval-Augmented Protein Function Generation as a Lightweight Alternative to Graph Encoders"
+author: "Jeff Houser"
+date: "2026-08-02"
+output:
+  pdf_document:
+    number_sections: true
+    toc: false
+    fig_caption: true
+    latex_engine: pdflatex
+classoption: twocolumn
+geometry: margin=0.75in
+fontsize: 10pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{float}
+  - \usepackage{microtype}
+  - \usepackage{natbib}
+  - \usepackage{stfloats}
+  - \setlength{\parskip}{0.3em}
+  - \setlength{\columnsep}{14pt}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.pos = "H",
+  fig.align = "center"
+)
+
+# Single-column table (narrow tables only)
+render_table <- function(df, caption, digits = 4, scale = TRUE) {
+  tbl <- knitr::kable(
+    df, format = "latex", booktabs = TRUE, linesep = "",
+    digits = digits, caption = caption, row.names = FALSE
+  )
+  if (requireNamespace("kableExtra", quietly = TRUE)) {
+    opts <- c("hold_position", "scale_down")
+    tbl <- kableExtra::kable_styling(tbl, latex_options = opts,
+                                     font_size = 7)
+  }
+  tbl
+}
+
+# Full-page-width table using table* environment
+span_table <- function(df, caption, digits = 4) {
+  tbl <- knitr::kable(df, format = "latex", booktabs = TRUE, linesep = "",
+                      digits = digits, caption = caption, row.names = FALSE)
+  if (requireNamespace("kableExtra", quietly = TRUE)) {
+    tbl <- kableExtra::kable_styling(tbl,
+                                     latex_options = c("scale_down"),
+                                     font_size = 7)
+  }
+  # Convert to character and swap table -> table* for two-column spanning.
+  # fixed=TRUE avoids regex escaping issues with curly braces.
+  tbl_str <- paste(as.character(tbl), collapse = "\n")
+  tbl_str <- sub("\\begin{table}", "\\begin{table*}", tbl_str, fixed = TRUE)
+  tbl_str <- sub("\\end{table}",   "\\end{table*}",   tbl_str, fixed = TRUE)
+  cat(tbl_str, "\n")
+}
+```
+
+\begin{abstract}
+\noindent
+Predicting the function of a protein with limited information such as the amino acid sequence of the protein is a difficult task that remains unresolved in the field of machine learning. Recent work has approached this problem using conditional text generation. Many leading models utilize graph neural networks to represent the structure of a protein in addition to its sequence although this is usually a computationally very intensive method to incorporate this information. This paper attempts to offer an alternative approach to incorporate structural information through use of a language model. A retrieval system is used that indexes protein structures to find closely related proteins with known protein functions. These text descriptions of functions are then used in a prompt as plain text, bypassing the need for numeric graph-based representations of structure. This paper uses an existing model named Prot2Text-V2 as a starting point to fine-tune using this altered prompt idea to represent protein structure. This base model utilized protein embedding information from ESM-2 and Llama-3.1 as a decoder. The fine-tuned model relies on LoRa to perform the fine-tuning and shows a cost in language metrics (such as 0.07 drop in BLEU-4) that is partially recovered with structural retrieval showing monotonic improvements (such as 0.012 BLEU-4 improvement). Structure-as-text works mechanistically but there are limitations in the model presented in this paper due to computational and time restrictions.
+\end{abstract}
+# Introduction
+
+Proteins are essential components of life that have diverse functions within living organisms. They are comprised of amino acids that form a defined sequence which then fold into a specific structure. Amino acids are molecules that can be represented by letters (such as the letter “A” for arginine)- this fact is taken advantage of by computational scientists in the field of language processing. A ”language” is created from these amino acids with learned embeddings representing different protein sequences such as in the model ESM-2 \cite{lin2023esm2}. While these embedding represent rich information that can be used in downstream understanding of protein function, they are often considered insufficient alone to predict function accurately.
+
+There are a large number of proteins with known sequence information but unknown function information with approximately 99% of proteins having unknown function{uniprot2025}. This creates a serious need to try to accurately predict the function of a protein given limited information such as the sequence and the organism from which it is obtained (also known as taxon).
+
+Conventional approaches to predicting function rely on multiclass label prediction with limited ability to learn new representations of functional information. Prot2Text \cite{abdine2024prot2text} reframed the task as generation: emit a
+free-text description conditioned on the protein. The initial model developed by Abdine et al. utilized a graph in which nodes are amino acids and edges connect residues that are
+physically close, then runs a relational graph convolutional network over it. The expense associated with this methodology inspired them to drop the structural component entirely for the second version of their model  \cite{abdine2025prot2textv2} and to focus on protein sequence using a contrastively aligned modality projector.
+
+
+
+## Alternative proposal: structure as a key, not a value
+
+Instead of encoding the query protein's structure, in the model in this paper it is used purely as a
+retrieval key. Foldseek \cite{vankempen2024foldseek} compresses a 3D
+structure into a string over a 20-state structural alphabet, reducing structural
+comparison to sequence alignment and making search over hundreds of thousands of
+structures tractable on CPU. It is used to find the training proteins whose
+shapes most resemble the query's, then insert those proteins' existing
+human-written descriptions into the prompt as plain text, alongside alignment
+statistics indicating how much to trust them. This avoids the need for a graph, structural encoder, or new alignment learning. This is retrieval-augmented generation
+\cite{lewis2020rag} with the output of English prose.
+
+This framing could be generalized to other problem cases wherever a domain has (i) a non-linguistic similarity measure and (ii) a corpus of human-written descriptions, one can substitute retrieval over that corpus for a learned encoder of the non-linguistic modality.
+
+# Background and Related Work
+
+\textbf{Protein function as generation.}
+Prot2Text \cite{abdine2024prot2text} established the free-text formulation,
+pairing an R-GCN structural encoder with a GPT-2 decoder. Prot2Text-V2
+\cite{abdine2025prot2textv2} replaces this with ESM2-3B 
+aligned to Llama-3.1-8B-Instruct \cite{grattafiori2024llama3} via contrastive
+pretraining. This paper fine-tunes directly from the released V2 checkpoint.
+
+\textbf{Modality projection.}
+Flamingo \cite{alayrac2022flamingo} and LLaVA \cite{liu2023llava} both map a
+non-text encoder's output into the decoder's embedding space via placeholder
+token positions. Prot2Text-V2 uses the same mechanism with a protein encoder,
+and this paper makes use of this structure.
+
+\textbf{Retrieval-augmented generation.}
+RAG \cite{lewis2020rag} conditions generation on documents fetched by a learned
+dense retriever; in-context RALM \cite{ram2023ralm} shows that simply prepending
+retrieved text to an unmodified LM yields large gains without retriever training- the mechanism relied on in this paper, with a structural retriever substituted for a lexical one.
+
+\textbf{Structural search.}
+Foldseek \cite{vankempen2024foldseek} discretises tertiary residue--residue
+interactions into ``3Di'' alphabet and performs structural alignment
+as sequence alignment. Protein structures come from the AlphaFold Protein Structure
+Database \cite{varadi2022alphafolddb}.
+
+\textbf{Evaluation.}
+BLEU \cite{papineni2002bleu}, ROUGE \cite{lin2004rouge}, and BERTScore
+\cite{zhang2020bertscore} are used for evaluation with both RoBERTa-large \cite{liu2019roberta} and
+BioBERT-large \cite{lee2020biobert}, matching both Prot2Text papers.
+
+\textbf{Parameter-efficient fine-tuning.}
+LoRA \cite{hu2022lora} inserts low-rank matrices alongside frozen decoder
+weights, making the 11B stack trainable on a single GPU.
+
+# Methods
+
+The training and test data come from SwissProt-derived protein splits released with Prot2Text: roughly 248,000 training, 4,200 validation, and 4,200 test proteins. All results are on the 4,203
+test proteins for which both the generations and the reference checkpoint's generations exist.
+
+## Base architecture
+
+The base model is the released Prot2Text-V2 checkpoint: ESM2-3B protein
+encoder, a two-layer modality projector, and Llama-3.1-8B-Instruct decoder.
+The projector maps each encoder hidden state into the decoder's embedding space;
+projected vectors are scattered into placeholder token positions immediately
+before the generation point.
+
+AlphaFold DB structures for all proteins were downloaded in all three splits and
+a Foldseek index was generated from the training data split. Test and
+validation proteins serve exclusively as queries to prevent leakage.
+
+```{r architecture-figure, fig.cap="Architectural changes made in this paper. Prompt is redesigned to include protein structural information and taxonomy. The modality projector is kept frozen to retain sequence-description alignment learned in Prot2textv2 paper.", out.width="100%", fig.align="center"}
+knitr::include_graphics("266_final_architecture2.png")
+```
+
+
+## Prompt design
+The system turn is based on the Prot2textv2 paper and uses the same language:
+\begin{small}
+\begin{verbatim}
+You are a scientific assistant specialized in protein function
+predictions. Given the sequence embeddings and 
+other information of a protein, describe its function clearly 
+and concisely in professional language.
+<|eot_id|><|start_header_id|>user<|end_header_id|>
+\end{verbatim}
+\end{small}
+
+The user turn contains three semicolon-delimited segments:
+
+\begin{small}
+\begin{verbatim}
+Taxon: {organism} ; Similar structures:
+(1) 62% id, 0.95 cov, E=8e-82,
+    org={hit org}: {hit description 1}
+(2) 44% id, 0.81 cov, E=3e-15,
+    org={hit org}: {hit description 2} ;
+Sequence embeddings: <ph> x L
+\end{verbatim}
+\end{small}
+
+Within the Prot2textv2 paper a similar prompt alteration is mentioned but this relies on knowledge of the test protein name which is problematic since it can be informative as to the function of the protein itself (such as `isocitrate dehydrogenase'). This is also problematic since novel protein sequences would not be able to rely on this mechanism to predict function. 
+
+The inclusion of percentage identity, query coverage, and E-value (significance value from foldseek) are included prior to the protein function description to help the model understand the weight to place on the functional text within the prompt.
+
+
+The test dataset used in this paper was designed to specifically avoid close sequence homology (or sameness) between train and test proteins. To help with the robustness of training high sequence similarity matches are downsampled in the training dataset (hits above 60% retained with probability 0.25). This also helps avoid direct copying of text if function descriptions are extremely similar. Dropout rate chosen for taxonomy and structure description are both low (0.1) since it’s anticipated that a high number of matches will exist among both train and test proteins. 
+
+
+## Training configuration
+LoRa rank and alpha values were chosen based on Prot2Textv2 values. Dropout of 0.1 used as previously discussed. Training size of 100,000 proteins was chosen due to computational limitations and limited to 1 epoch. Max protein sequence length matches Prot2Textv2 paper. The LoRa target modules mirror Llama attention heads to allow for modification of output. Embeddings and the modality projector are frozen since token vocabulary is not changed. The Pro2textv2 model leaves the modality projector unfrozen but out of concern for disruption of the learned alignment between ESM2 and Llama embeddings it is left frozen in the fine-tuned model in this paper.The focus of fine-tuning is restricted to the decoder generation task while avoiding disruption of encoder generation.
+
+```{r train-config}
+cfg <- data.frame(
+  Setting = c("LoRA rank / alpha / dropout",
+              "LoRA target modules", "Modality projector",
+              "Training proteins", "Epochs",
+              "Micro-batch / accumulation", "Effective batch",
+              "Optimizer steps", "Learning rate",
+              "Precision", "Max sequence length",
+              "Hits per prompt"),
+  Value = c("16 / 32 / 0.1",
+            "q,k,v,o + gate,up,down", "frozen",
+            "100,000", "1", "4 / 16",
+            "64", "~1,562", "1e-4",
+            "bfloat16 + grad. ckpt.", "1021 residues", "2")
+)
+render_table(cfg, "Training configuration.", scale = FALSE)
+```
+
+
+## Evaluation conditions
+
+Three different prompt conditions were used to generate predictions for comparison:
+
+\begin{itemize}
+\item \textbf{seq\_only} --- taxonomy forced to ``unknown'' and structural text removed, only sequence embeddings remain. This acts as a “baseline” model after fine-tuning.\item \textbf{without structure} --- real taxonomy and sequence embeddings, no structural information retrieval.
+\item \textbf{with structure} --- taxonomy, structural information retrieval, and sequence
+embeddings.
+\end{itemize}
+
+These conditions are compared against the \textbf{released Prot2Text-V2 checkpoint} generated under its own sequence-only format. The \texttt{seq\_only} vs.\ released
+checkpoint pairing is the weights-only comparison: same prompt, same initial
+weights, differing only in LoRA fine-tuning.
+
+# Results and Discussion
+
+## Aggregate performance
+
+```{r aggregate-table, results='asis'}
+agg <- data.frame(
+  Condition    = c("Prot2Text-V2 (released)",
+                   "seq_only ", "without structure", "with structure"),
+  EM           = c(0.3990, 0.3583, 0.3605, 0.3685),
+  B2           = c(0.4458, 0.3712, 0.3757, 0.3829),
+  B4           = c(0.4056, 0.3355, 0.3405, 0.3478),
+  R1           = c(0.5785, 0.5303, 0.5327, 0.5420),
+  RL           = c(0.5588, 0.5113, 0.5143, 0.5234),
+  BR           = c(0.9185, 0.9109, 0.9113, 0.9129),
+  BB           = c(0.8665, 0.8518, 0.8530, 0.8551)
+)
+colnames(agg) <- c("Condition", "EM", "B-2", "B-4",
+                   "R-1", "R-L", "Rob-F1", "Bio-F1")
+span_table(agg,
+  "Aggregate metrics on 4,203 held-out proteins. Row 1 is the initialisation checkpoint evaluated under its native sequence-only prompt. Row 2 reproduces that prompt with fine-tuned weights, making rows 1--2 a weights-only comparison.")
+```
+
+Table 1 supports a clean two-part decomposition.
+
+\textbf{Fine-tuning costs 0.070 BLEU-4.} Rows 1 and 2 use the same prompt and
+the same initial weights. The only difference is one epoch of LoRA fine-tuning,
+which costs $-0.0701$ BLEU-4, $-0.0475$ ROUGE-L, and $-0.0147$ BioBERT-F1.
+Because the prompt is held constant, this loss is attributable to the weight
+update alone.
+
+\textbf{Retrieval recovers roughly a fifth.} Within the fine-tuned model,
+the ordering \texttt{seq\_only} $<$ \texttt{without} $<$ \texttt{with} holds
+without exception across all seven metrics. Adding  taxonomy leads to
+$+0.0050$ BLEU-4; adding the retrieval block increases a further $+0.0073$, for a
+total recovery of $+0.0123$ BLEU-4 and $+0.0121$ ROUGE-L --- about 18\% and
+25\% of what fine-tuning gave away.
+
+```{r decomposition-table, results='asis'}
+decomp <- data.frame(
+  Step = c("Fine-tuning (prompt constant)",
+           "+ taxonomy",
+           "+ Structural retrieval",
+           "Net (released compared to retrieval)"),
+  `BLEU-4`  = c(-0.0701, +0.0050, +0.0073, -0.0578),
+  `ROUGE-L` = c(-0.0475, +0.0030, +0.0091, -0.0354),
+  `Bio-F1`  = c(-0.0147, +0.0012, +0.0021, -0.0114),
+  check.names = FALSE
+)
+span_table(decomp,
+  "Effect decomposition. Row 1 is a controlled weights-only effect; rows 2--3 are controlled prompt-only effects within the fine-tuned model.")
+```
+
+The conclusion: \textbf{structure-as-text works as a mechanism, and the
+fine-tuning budget limits the system.} The retrieval signal is real, consistent,
+and obtained without any structural encoder. It is currently being spent
+climbing out of a hole created by under-training.
+
+## Stratified by structural similarity
+
+```{r stratified-table, results='asis'}
+strat <- data.frame(
+  Bin    = c("no hit", "<20%", "20-30%", "30-50%", ">50%"),
+  n      = c(40L, 638L, 886L, 1457L, 1182L),
+  dB4    = c(-0.0005,  0.0105, -0.0027,  0.0103,  0.0100),
+  dRL    = c(-0.0005,  0.0052,  0.0075,  0.0109,  0.0106),
+  dBR    = c(-0.0015,  0.0011,  0.0009,  0.0019,  0.0019),
+  dBB    = c(-0.0008,  0.0005,  0.0003,  0.0029,  0.0033),
+  check.names = FALSE
+)
+colnames(strat) <- c("Bin","n","dB4","dRL","dRob","dBio")
+span_table(strat,
+  "With vs. without structural retrieval across identity bins. Positive deltas favor the with-retrieval condition.")
+
+```
+
+Table 4 shows that structural retrieval improves over taxonomy and sequence alone in a manner dependent on structural similarity between protein sequences and their hits. No hit (the smallest bin) actually shows a slight decrease in performance relative to taxonomy with an increase in metrics observed that correlates with increasing sequence similarity.
+
+
+## Qualitative comparison
+
+```{r example-renderer, results='asis'}
+
+examples <- list(
+  list(
+    accession = "P04956",
+    taxon     = "Acetivibrio",
+    identity  = "27.6%",
+    hit_org   = "Acidothermus",
+    hit_desc  = "Has a very high specific activity on carboxymethylcellulose.",
+    reference = "This enzyme catalyzes the endohydrolysis of 1,4-beta-glucosidic linkages in cellulose, lichenin and cereal beta-D-glucans.",
+    pred_with = "This enzyme catalyzes the endohydrolysis of 1,4-beta-glucosidic linkages in cellulose, lichenin and cereal beta-D-glucans.",
+    pred_wo   = "The biological conversion of cellulose to glucose generally requires three types of hydrolytic enzymes: (1) Endoglucanases which cut internal beta-1,4-glucosidic bonds; (2) Exocellobiohydrolases that cut the disaccharide cellobiose from the non-reducing end of the cellulose polymer chain; (3) Beta-1,4-glucosidases which hydrolyze the cellobiose and other short cello-oligosaccharides to glucose.",
+    pred_ref  = "Potentially capable of cleaving the specific glycoside linkages in the process of mucin degradation in human intestinal tract (Probable). Hydrolyzes synthetic substrate pNP-beta-GlcNAc with high activity and pNP-beta-GalNAc to a lot lesser extent. Does not hydrolyze pNP-alpha-GalNAc.",
+    comment   = "Structural retrieval improves over predictions made without retrieval or using the checkpoint model- likely due to the presence of the word carboxymethylcellulose being present in the hit description and cellulose present in the reference. Taxon only (without retrieval) also shows some improvement over the checkpoint"
+  ),
+  list(
+    accession = "Q87J97",
+    taxon     = "Vibrio",
+    identity  = "32.6%",
+    hit_org   = "Listeria",
+    hit_desc  = "High-affinity uptake of glycine betaine, driven by a sodium-motive force. Involved, with GbuABC and OpuC, in osmoprotection and cryoprotection of Listeria. Does not mediate either carnitine or choline uptake.",
+    reference = "Involved in the uptake of the osmoprotectant glycine betaine.",
+    pred_with = "Involved in the uptake of the osmoprotectant glycine betaine.",
+    pred_wo   = "Involved in glycerol-3-phosphate uptake.",
+    pred_ref  = "Catalyzes the energy-dependent uptake of carnitine and is essential for growth on carnitine. Can also mediate the uptake of choline. Is probably a proton:substrate symporter.",
+    comment   = "Structural retrieval again shows improvement- likely due to the presence of key words such as glycine betaine and osmoprotection present in the hit description and reference"
+  ),
+  list(
+    accession = "P53244",
+    taxon     = "Saccharomyces",
+    identity  = "21.8%",
+    hit_org   = "Saccharomyces",
+    hit_desc  = "Mediates resistance to o-dinitrobenzene, calcium and zinc.",
+    reference = "May regulate endocytosis by recruiting RSP5 ubiquitin ligase activity to specific plasma membrane proteins in response to extracellular stimuli",
+    pred_with = "May be involved in the regulation of gene expression responses of environment-sensing pathways.",
+    pred_wo   = "May be involved in the activation of the plasma membrane proton-ATPase by glucose.",
+    pred_ref  = "May regulate endocytosis by recruiting RSP5 ubiquitin ligase activity to specific plasma membrane proteins in response to extracellular stimuli.",
+    comment   = "The structural retrieval prompt shows worse predictive ability than the checkpoint model. This may be due to the hit description being unrelated to the reference causing some confusion in the model"
+  )
+)
+
+for (i in seq_along(examples)) {
+  e <- examples[[i]]
+  cat(sprintf(
+    "\n\\noindent\\textbf{Example %d} (%s; %s identity; hit from %s)\n\n",
+    i, e$accession, e$identity, e$hit_org))
+  cat(sprintf("\\noindent\\emph{Foldseek Hit Description:} %s\n\n", e$hit_desc))
+  cat(sprintf("\\noindent\\emph{Reference:} %s\n\n", e$reference))
+  cat(sprintf("\\noindent\\emph{With structural retrieval:} %s\n\n", e$pred_with))
+  cat(sprintf("\\noindent\\emph{Without structural retrieval:} %s\n\n", e$pred_wo))
+  cat(sprintf("\\noindent\\emph{Released checkpoint:} %s\n\n", e$pred_ref))
+  cat(sprintf("\\noindent\\small\\textit{%s}\\normalsize\n\n\\vspace{0.4em}\n",
+              e$comment))
+}
+```
+
+
+The monotone ablation ordering is consistent with in-context RALM
+\cite{ram2023ralm}: prepending retrieved text to an unmodified decoder yields
+gains without retriever training. This is observed in this paper with a structural rather
+than lexical retriever.
+
+The regression relative to initialisation is a recognisable pattern.
+Fine-tuning a well-converged model on a narrower objective for insufficient
+steps is a standard route to catastrophic forgetting
+\cite{french1999catastrophic,kirkpatrick2017ewc}: LoRA updates perturb
+representations faster than the new signal consolidates. The \texttt{seq\_only}
+condition lets us measure this separately from the intervention because it holds
+the prompt fixed.
+
+# Limitations and Future Work
+
+The fine-tuning was performed using a single A100 80gb GPU. Training took approximately 11 hours on 100,000 proteins, a subset of the full training set. Due to the size of the model and computational limitations it was not possible to complete a full epoch of training which could have further improved model performance. The observed BLEU-4 reduction of 0.07 is attributable to weight updates due to LoRa fine-tuning. Reducing the learning rate may provide lesser model degradation from LoRa instantiation. A small subset was run with a reduced learning rate (5e-5) and showed a lesser increase in the loss with initial training compared with 1e-4 although a full run was not able to be performed that generated predictions due to time and computational constraints. 
+
+The dropout rate of the different categories (taxon and structure retrieval) could be further optimized to improve model performance for proteins with low/no structural retrieval information. An initial subset of the training data was run on 30,000 proteins with dropout of 0.8 for both taxon and structural retrieval but showed little difference between predictions generated with and without structural retrieval (likely due to insufficient examples seeing both fields present). 
+
+Structural retrieval in this model exists at the beginning of the prompt and is followed by protein sequence which may contain a large number of placeholder tokens. Long-context models are known to underweight material not adjacent to the generation point \cite{liu2024lostmiddle}. Moving the retrieval block after the placeholder run could potentially have some influence on model performance.
+
+# Conclusion
+
+This paper hoped to approach the problem of dealing with protein structural information through language rather than a learned embedding to replace graph neural encoders to improve computational efficiency. The controlled ablation (a prompt not containing structural retrieval or taxon in the finetuned model) suggests that the addition of textual descriptions that have similar protein structures helps improve predictive accuracy across all metrics measured.
+
+Performing LoRa fine-tuning however had a negative impact on checkpoint model performance, this may be due to undertraining or underoptimization of training conditions to minimize this effect.
+
+Structural retrieval over a corpus of human-written descriptions, keyed
+by a domain-specific similarity function, is a cheap and architecturally trivial
+substitute for a learned encoder of a non-linguistic modality. It requires no
+new parameters, no alignment training, and no graph construction. For any domain
+that already has both a similarity measure and an annotated corpus, that trade is
+worth evaluating before developing a novel encoder.
+
+# Data Availability
+
+Code for this paper is available in https://github.com/jhouser220/266_final/tree/main.
+
+\begin{thebibliography}{99}
+\small
+
+\bibitem[Abdine et al., 2024]{abdine2024prot2text}
+Abdine, H., Chatzianastasis, M., Bouyioukos, C., and Vazirgiannis, M. (2024).
+Prot2Text: Multimodal Protein's Function Generation with GNNs and Transformers.
+\emph{Proc. AAAI}, 38(10):10757--10765.
+
+\bibitem[Fei et al., 2025]{abdine2025prot2textv2}
+Fei, X., Chatzianastasis, M., Almeida Carneiro, S., Abdine, H., Petalidis, L. P.,
+and Vazirgiannis, M. (2025).
+Prot2Text-V2: Protein Function Prediction with Multimodal Contrastive Alignment.
+\emph{NeurIPS 2025}. arXiv:2505.11194.
+
+\bibitem[Alayrac et al., 2022]{alayrac2022flamingo}
+Alayrac, J.-B., et al. (2022).
+Flamingo: a Visual Language Model for Few-Shot Learning.
+\emph{NeurIPS}, 35.
+
+\bibitem[French, 1999]{french1999catastrophic}
+French, R. M. (1999).
+Catastrophic forgetting in connectionist networks.
+\emph{Trends in Cognitive Sciences}, 3(4):128--135.
+
+\bibitem[Grattafiori et al., 2024]{grattafiori2024llama3}
+Grattafiori, A., et al. (2024).
+The Llama 3 Herd of Models. arXiv:2407.21783.
+
+\bibitem[Hu et al., 2022]{hu2022lora}
+Hu, E. J., et al. (2022).
+LoRA: Low-Rank Adaptation of Large Language Models. \emph{ICLR}.
+
+\bibitem[Jumper et al., 2021]{jumper2021alphafold}
+Jumper, J., et al. (2021).
+Highly accurate protein structure prediction with AlphaFold.
+\emph{Nature}, 596:583--589.
+
+\bibitem[Khandelwal et al., 2020]{khandelwal2020knnlm}
+Khandelwal, U., et al. (2020).
+Generalization through Memorization: Nearest Neighbor Language Models. \emph{ICLR}.
+
+\bibitem[Kirkpatrick et al., 2017]{kirkpatrick2017ewc}
+Kirkpatrick, J., et al. (2017).
+Overcoming catastrophic forgetting in neural networks.
+\emph{PNAS}, 114(13):3521--3526.
+
+\bibitem[Lee et al., 2020]{lee2020biobert}
+Lee, J., et al. (2020).
+BioBERT: a pre-trained biomedical language representation model.
+\emph{Bioinformatics}, 36(4):1234--1240.
+
+\bibitem[Lewis et al., 2020]{lewis2020rag}
+Lewis, P., et al. (2020).
+Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. \emph{NeurIPS}, 33.
+
+\bibitem[Lin, 2004]{lin2004rouge}
+Lin, C.-Y. (2004).
+ROUGE: A Package for Automatic Evaluation of Summaries. \emph{ACL Workshop}.
+
+\bibitem[Lin et al., 2023]{lin2023esm2}
+Lin, Z., et al. (2023).
+Evolutionary-scale prediction of atomic-level protein structure with a language model.
+\emph{Science}, 379(6637):1123--1130.
+
+\bibitem[Liu et al., 2023]{liu2023llava}
+Liu, H., et al. (2023).
+Visual Instruction Tuning. \emph{NeurIPS}, 36.
+
+\bibitem[Liu et al., 2024]{liu2024lostmiddle}
+Liu, N. F., et al. (2024).
+Lost in the Middle: How Language Models Use Long Contexts.
+\emph{TACL}, 12:157--173.
+
+\bibitem[Liu et al., 2019]{liu2019roberta}
+Liu, Y., et al. (2019).
+RoBERTa: A Robustly Optimized BERT Pretraining Approach. arXiv:1907.11692.
+
+\bibitem[Papineni et al., 2002]{papineni2002bleu}
+Papineni, K., et al. (2002).
+BLEU: a Method for Automatic Evaluation of Machine Translation. \emph{ACL}, 311--318.
+
+\bibitem[Ram et al., 2023]{ram2023ralm}
+Ram, O., et al. (2023).
+In-Context Retrieval-Augmented Language Models. \emph{TACL}, 11:1316--1331.
+
+
+\bibitem[van Kempen et al., 2024]{vankempen2024foldseek}
+van Kempen, M., et al. (2024).
+Fast and accurate protein structure search with Foldseek.
+\emph{Nature Biotechnology}, 42(2):243--246.
+
+\bibitem[Varadi et al., 2022]{varadi2022alphafolddb}
+Varadi, M., et al. (2022).
+AlphaFold Protein Structure Database.
+\emph{Nucleic Acids Research}, 50(D1):D439--D444.
+
+\bibitem[Zhang et al., 2020]{zhang2020bertscore}
+Zhang, T., et al. (2020).
+BERTScore: Evaluating Text Generation with BERT. \emph{ICLR}.
+
+\bibitem[UniProt Consortium, 2025]{uniprot2025} The UniProt Consortium (2025). UniProt: the Universal Protein Knowledgebase in 2025. \emph{Nucleic Acids Research}, 53(D1):D609--D617.
+
+\end{thebibliography}
+
+
+
+
+
